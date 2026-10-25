@@ -1,0 +1,155 @@
+<h2>Overview</h2>
+<p>A REST API for a college placement cell: students, companies, job postings and applications. Beyond basic create/read/update,
+it enforces the rules a real placement process depends on (<b>eligibility, an application workflow, an offer limit</b>) and
+it stays correct when things go wrong: <b>clients retry, two reviewers click at the same moment, a student tries to act as
+someone else</b>.</p>
+<div class="stats">
+  <div class="stat"><b>19</b><span>endpoints, with OpenAPI docs</span></div>
+  <div class="stat"><b>1</b><span>winner when 8 parallel offers race for 1 opening</span></div>
+  <div class="stat"><b>2</b><span>roles (officer, student), checked on every route</span></div>
+  <div class="stat"><b>48</b><span>automated tests in CI</span></div>
+</div>
+<p>Python · FastAPI · SQLite with plain SQL (no ORM) · Pydantic · pytest · Docker · GitHub Actions · Render blueprint</p>
+
+<h2>Architecture</h2>
+<div class="mermaid">
+flowchart LR
+  C[Client] -->|X-API-Key, Idempotency-Key| M[Middleware<br/>request ID, JSON log, metrics]
+  M --> A{Auth<br/>hashed API key -> role}
+  A -->|officer / student| R[Routes<br/>validation 422]
+  R --> I[Idempotency<br/>replay stored response]
+  I --> S[Services<br/>eligibility, workflow,<br/>offer limit, audit]
+  S -->|BEGIN IMMEDIATE<br/>compare-and-set| D[(SQLite)]
+</div>
+<table>
+<tr><th>Layer</th><th>File</th><th>Knows about</th></tr>
+<tr><td>HTTP</td><td><code>app/main.py</code></td><td>Routes, status codes, request and response models</td></tr>
+<tr><td>Validation</td><td><code>app/schemas.py</code></td><td>Email, CGPA 0–10, branch codes, roll-number format, deadlines</td></tr>
+<tr><td>Business rules</td><td><code>app/services.py</code></td><td>Eligibility, workflow, offer limit, audit events</td></tr>
+<tr><td>Data</td><td><code>app/repository.py</code></td><td>SQL only</td></tr>
+<tr><td>Cross-cutting</td><td><code>security.py</code>, <code>idempotency.py</code>, <code>observability.py</code></td><td>Keys and roles, retry safety, request IDs and metrics</td></tr>
+</table>
+<img class="shot" src="file:///C:/Users/ashut/Downloads/New%20folder%20(9)/kriti-projects/campus-recruitment-api/docs/screenshot-swagger.png" alt="Interactive API documentation">
+
+<h2>Data model</h2>
+<div class="mermaid">
+erDiagram
+  STUDENT ||--o{ APPLICATION : submits
+  JOB ||--o{ APPLICATION : receives
+  COMPANY ||--o{ JOB : posts
+  APPLICATION ||--o{ APPLICATION_EVENT : "history"
+  STUDENT { int id string email UK string roll_no UK string branch float cgpa string key_hash }
+  JOB { int id float min_cgpa int openings date deadline string status }
+  APPLICATION { int id int student_id int job_id string status }
+  APPLICATION_EVENT { string from_status string to_status string actor string at }
+</div>
+<p>One application per student per job is a database <code>UNIQUE</code> constraint, so it holds even when two requests
+arrive together; a Python check alone could be raced.</p>
+
+<h2>Rules the API enforces</h2>
+<table>
+<tr><th>Rule</th><th>Response when broken</th></tr>
+<tr><td>Valid input (email, CGPA 0–10, known branch, openings &gt; 0, deadline not in the past)</td><td>422</td></tr>
+<tr><td>Unique email, roll number, company name; one application per student per job</td><td>409</td></tr>
+<tr><td>Branch eligible and CGPA at least the job's minimum</td><td>403</td></tr>
+<tr><td>Students only see and change their own records (not their CGPA)</td><td>403</td></tr>
+<tr><td>Status moves only along the workflow below</td><td>409</td></tr>
+<tr><td>No more offers than openings; the job closes itself when full</td><td>409</td></tr>
+</table>
+<div class="mermaid">
+stateDiagram-v2
+  direction LR
+  [*] --> applied
+  applied --> shortlisted
+  applied --> rejected
+  applied --> withdrawn
+  shortlisted --> interview
+  shortlisted --> rejected
+  shortlisted --> withdrawn
+  interview --> offered
+  interview --> rejected
+</div>
+
+<h2>Walkthrough: real requests</h2>
+<p>Output of <code>scripts/walkthrough.py</code> against a fresh local server (a job with <b>one</b> opening, minimum CGPA 7.5, CSE/IT only):</p>
+<pre><code>POST /jobs  openings=1, min CGPA 7.5, CSE/IT
+  -> 201  {"id": 1, "title": "SWE Intern", "openings": 1, "status": "open"}
+POST /students x4  -> 201, each returns its own API key once (only a SHA-256 hash is stored)
+Asha (student) applies, Idempotency-Key: a1
+  -> 201  {"id": 1, "status": "applied"}
+same request retried after a timeout (key a1)
+  -> 201  Idempotent-Replayed: true  {"id": 1, "status": "applied"}
+Meera (ME branch) applies
+  -> 403  {"detail": "branch ME is not eligible for this job"}
+Kabir (CGPA 6.9) applies
+  -> 403  {"detail": "CGPA 6.9 is below the minimum 7.5"}
+Ravi tries to apply as Asha
+  -> 403  {"detail": "students can only access their own records"}
+Officer: applied -> offered (skips interview)
+  -> 409  {"detail": "cannot move an application from 'applied' to 'offered'"}
+Two reviewers offer the last opening at the same moment
+  -> [200, 409]  (exactly one 200, the other 409)
+GET /jobs/1/stats
+  -> 200  {"openings": 1, "total_applications": 2, "by_status": {"interview": 1, "offered": 1}, "offers_left": 0}
+GET /jobs/1
+  -> 200  {"status": "closed"}</code></pre>
+
+<h2>Reliability</h2>
+<h3>Retries: idempotency keys</h3>
+<p>A client that times out cannot know whether its request worked. With an <code>Idempotency-Key</code>, the first response is
+stored and a retry gets the same response back (<code>Idempotent-Replayed: true</code>) instead of acting twice. Reusing a key
+with a different body is rejected (422); failed requests are not stored, so a corrected retry still works. Payment APIs
+require the same pattern.</p>
+<h3>Races: the last opening</h3>
+<p><code>change_status</code> reads the application, checks "offers left?" and writes inside one <code>BEGIN IMMEDIATE</code> transaction,
+which takes SQLite's write lock before reading. The second reviewer therefore sees the first offer and gets 409. The update is
+also compare-and-set (<code>WHERE status = &lt;status we read&gt;</code>). <code>tests/test_concurrency.py</code> fires 8 parallel offers
+at a job with one opening and checks that exactly one wins.</p>
+<div class="note">Writing that test found a real bug: the database connection was opened on one worker thread and used on
+another, which SQLite refuses by default. The fix and the reasoning are in <code>app/db.py</code>.</div>
+
+<h2>Security and observability</h2>
+<table>
+<tr><th>Concern</th><th>How</th></tr>
+<tr><td>Authentication</td><td><code>X-API-Key</code> on every request. Student keys are random, shown once, stored as SHA-256 hashes; the officer key is compared in constant time.</td></tr>
+<tr><td>Authorisation</td><td>Officer: everything. Student: own profile (not CGPA), own applications, job listings. Checked in routes and again in services.</td></tr>
+<tr><td>Audit</td><td>Every status change records from, to, actor (<code>officer</code> / <code>student:&lt;id&gt;</code>) and time.</td></tr>
+<tr><td>Tracing</td><td><code>X-Request-ID</code> on every response (echoed if sent), one JSON log line per request.</td></tr>
+<tr><td>Metrics</td><td><code>/metrics</code>: requests, status codes and p50/p95 latency per route template (officer only).</td></tr>
+<tr><td>Delivery</td><td>Dockerfile (non-root user, database in a volume), GitHub Actions CI, one-click Render blueprint.</td></tr>
+</table>
+
+<h2>Testing</h2>
+<table>
+<tr><th>Suite</th><th>Covers</th></tr>
+<tr><td><code>test_students.py</code></td><td>Validation, uniqueness, filters, pagination, partial updates, delete cascade</td></tr>
+<tr><td><code>test_jobs_and_applications.py</code></td><td>Eligibility, deadlines, workflow transitions, offer limit, auto-close, stats</td></tr>
+<tr><td><code>test_security_reliability.py</code></td><td>Keys, roles, ownership, idempotent replay and conflicts, request IDs, metrics</td></tr>
+<tr><td><code>test_concurrency.py</code></td><td>8 parallel offers for 1 opening: exactly one succeeds</td></tr>
+</table>
+<pre><code>pip install -r requirements.txt
+$env:RECRUIT_ADMIN_KEY = "&lt;a long random string&gt;"
+uvicorn app.main:app --reload        # http://127.0.0.1:8000/docs
+python -m pytest -q                  # 48 tests</code></pre>
+
+<h2>Limitations and next steps</h2>
+<ul>
+<li>Idempotency is checked before and stored after the action, outside one transaction: two <i>simultaneous</i> first attempts with the same key could both run (the <code>UNIQUE</code> rule still blocks a duplicate application). Fix: reserve the key in the same transaction.</li>
+<li>Key rotation and expiry; per-key rate limiting.</li>
+<li>Migrations (Alembic) and PostgreSQL for several instances, with row locks (<code>SELECT … FOR UPDATE</code>) instead of SQLite's single write lock.</li>
+<li>Export metrics to Prometheus instead of in-process counters.</li>
+</ul>
+
+<h2>Interview questions</h2>
+<dl class="qa">
+<dt>Why a database constraint and not only a Python check for duplicates?</dt>
+<dd>Two requests can both pass the Python check before either inserts. The constraint is enforced by the database at write time.</dd>
+<dt>Why <code>BEGIN IMMEDIATE</code> instead of <code>BEGIN</code>?</dt>
+<dd>A plain <code>BEGIN</code> takes the write lock only at the first write, so two transactions could both read "1 offer left". <code>IMMEDIATE</code> locks before the read.</dd>
+<dt>422 vs 403 vs 404 vs 409?</dt>
+<dd>Malformed input; allowed input but a rule forbids it; record missing; request conflicts with the current state.</dd>
+<dt>Why store API keys hashed and compare in constant time?</dt>
+<dd>A leaked database does not leak usable keys; constant-time comparison stops timing attacks from guessing a key byte by byte.</dd>
+<dt>What does an idempotency key protect against?</dt>
+<dd>A client retrying after a timeout and causing the action twice: a second application, a second status change, or in payments a second charge.</dd>
+</dl>

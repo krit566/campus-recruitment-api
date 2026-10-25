@@ -1,0 +1,17 @@
+# One-click deploy on Render (free tier): New + > Blueprint > pick this repo.
+# Render generates RECRUIT_ADMIN_KEY (the placement officer's key); read it in the dashboard to try the API at /docs.
+services:
+  - type: web
+    name: campus-recruitment-api
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.4"
+      - key: RECRUIT_ADMIN_KEY
+        generateValue: true
+      - key: RECRUIT_DB
+        value: /tmp/recruitment.db # free tier has no disk: data resets on restart (fine for a demo)

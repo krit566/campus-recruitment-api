@@ -1,6 +1,6 @@
 """Auth and roles, idempotency keys, audit trail, request ids and metrics."""
 
-from conftest import make_company, make_job, make_student
+from conftest import make_company, make_job, make_student, sql
 
 
 def as_key(key):
@@ -12,15 +12,11 @@ def test_requests_without_or_with_wrong_key_are_401(client):
     assert client.get("/jobs", headers=as_key("nope")).status_code == 401
 
 
-def test_student_key_is_returned_once_and_stored_hashed(client):
+def test_student_key_is_returned_once_and_stored_hashed(client, db_url):
     s = make_student(client)
     assert s["api_key"].startswith("stu_")
     assert "api_key" not in client.get(f"/students/{s['id']}").json()
-    import sqlite3
-
-    from app.db import db_path
-
-    stored = [r[0] for r in sqlite3.connect(db_path()).execute("SELECT key_hash FROM api_keys")]
+    stored = [r[0] for r in sql(db_url, "SELECT key_hash FROM api_keys")]
     assert s["api_key"] not in stored and len(stored[0]) == 64  # SHA-256 hex, never the key itself
 
 

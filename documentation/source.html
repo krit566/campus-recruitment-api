@@ -1,60 +1,87 @@
 <h2>Overview</h2>
-<p>A REST API for a college placement cell: students, companies, job postings and applications. Beyond basic create/read/update,
-it enforces the rules a real placement process depends on (<b>eligibility, an application workflow, an offer limit</b>) and
-it stays correct when things go wrong: <b>clients retry, two reviewers click at the same moment, a student tries to act as
-someone else</b>.</p>
+<p><b>PlaceRight</b> is a full-stack campus placement portal. Students sign up with their college email, see only the jobs
+they are eligible for, apply once and follow each application from "applied" to "offered". The placement office verifies
+CGPAs, posts jobs, moves applicants through a kanban pipeline, books interview slots without clashes and exports applicant
+lists. Beyond create/read/update, it stays correct when things go wrong: <b>clients retry, two reviewers click at the same
+moment, two officers book the same panel, a student tries to act as someone else</b>.</p>
 <div class="stats">
-  <div class="stat"><b>19</b><span>endpoints, with OpenAPI docs</span></div>
-  <div class="stat"><b>1</b><span>winner when 8 parallel offers race for 1 opening</span></div>
-  <div class="stat"><b>2</b><span>roles (officer, student), checked on every route</span></div>
-  <div class="stat"><b>48</b><span>automated tests in CI</span></div>
+  <div class="stat"><b>77</b><span>backend tests against real PostgreSQL</span></div>
+  <div class="stat"><b>11</b><span>web-app tests incl. axe accessibility checks</span></div>
+  <div class="stat"><b>1 of 8</b><span>parallel offers wins when one opening is left</span></div>
+  <div class="stat"><b>2</b><span>roles: student and placement office</span></div>
 </div>
-<p>Python · FastAPI · SQLite with plain SQL (no ORM) · Pydantic · pytest · Docker · GitHub Actions · Render blueprint</p>
+<p>React + TypeScript (Vite, React Router) · FastAPI · PostgreSQL with plain SQL and Alembic migrations · JWT + bcrypt ·
+Docker Compose (Postgres, API, nginx) · GitHub Actions · Render blueprint</p>
+<img class="shot" src="file:///C:/Users/ashut/Downloads/New%20folder%20(9)/kriti-projects/campus-recruitment-api/docs/screenshot-dashboard.png" alt="Officer dashboard">
+<div class="note">All people and companies in the screenshots are fictional demo data created by <code>seed.py</code>.
+The numbers on the dashboard are whatever is in the database; no real usage is claimed.</div>
+
+<h2>Features</h2>
+<table>
+<tr><th>Student</th><th>Placement office</th></tr>
+<tr><td>Sign up with a college email (other domains refused); sign in</td><td>Dashboard: students, open jobs, applications, offers, placement rate, upcoming interviews</td></tr>
+<tr><td>Jobs filtered by branch and verified CGPA, with the reason a job is not open</td><td>Charts: applications per job, where applications are, placements by branch</td></tr>
+<tr><td>One-click apply, safe to retry</td><td>Per-job kanban pipeline; only valid moves offered (buttons or drag and drop)</td></tr>
+<tr><td>Progress bar and timeline for every application; withdraw before the interview</td><td>Applicant detail: profile, resume, audit history, interview scheduling</td></tr>
+<tr><td>Resume upload (PDF, max 2 MB)</td><td>CGPA verification, companies, jobs (create, close), CSV export</td></tr>
+<tr><td>Notifications for status changes and interview invitations</td><td>Interview calendar grouped by day</td></tr>
+</table>
+<img class="shot" src="file:///C:/Users/ashut/Downloads/New%20folder%20(9)/kriti-projects/campus-recruitment-api/docs/screenshot-pipeline.png" alt="Kanban pipeline">
 
 <h2>Architecture</h2>
 <div class="mermaid">
 flowchart LR
-  C[Client] -->|X-API-Key, Idempotency-Key| M[Middleware<br/>request ID, JSON log, metrics]
-  M --> A{Auth<br/>hashed API key -> role}
-  A -->|officer / student| R[Routes<br/>validation 422]
-  R --> I[Idempotency<br/>replay stored response]
-  I --> S[Services<br/>eligibility, workflow,<br/>offer limit, audit]
-  S -->|BEGIN IMMEDIATE<br/>compare-and-set| D[(SQLite)]
+  B[Browser<br/>React + TypeScript] -->|/api/*| N[nginx<br/>static files + proxy]
+  N --> M[FastAPI middleware<br/>request ID, JSON log, metrics]
+  M --> A{Auth<br/>JWT or API key}
+  A --> R[Routes<br/>validation 422]
+  R --> I[Idempotency<br/>key reserved in<br/>the same transaction]
+  I --> S[Services<br/>eligibility, workflow,<br/>offers, interviews]
+  S -->|row locks| D[(PostgreSQL)]
 </div>
 <table>
 <tr><th>Layer</th><th>File</th><th>Knows about</th></tr>
-<tr><td>HTTP</td><td><code>app/main.py</code></td><td>Routes, status codes, request and response models</td></tr>
-<tr><td>Validation</td><td><code>app/schemas.py</code></td><td>Email, CGPA 0–10, branch codes, roll-number format, deadlines</td></tr>
-<tr><td>Business rules</td><td><code>app/services.py</code></td><td>Eligibility, workflow, offer limit, audit events</td></tr>
-<tr><td>Data</td><td><code>app/repository.py</code></td><td>SQL only</td></tr>
-<tr><td>Cross-cutting</td><td><code>security.py</code>, <code>idempotency.py</code>, <code>observability.py</code></td><td>Keys and roles, retry safety, request IDs and metrics</td></tr>
+<tr><td>Web app</td><td><code>frontend/src</code></td><td>Pages, forms, the API client (<code>api.ts</code>), who is signed in (<code>auth.tsx</code>)</td></tr>
+<tr><td>HTTP</td><td><code>backend/app/main.py</code></td><td>Routes, status codes, who may call each route</td></tr>
+<tr><td>Validation</td><td><code>schemas.py</code></td><td>Email, CGPA 0–10, branch codes, time zones, lengths</td></tr>
+<tr><td>Business rules</td><td><code>services.py</code></td><td>Eligibility, workflow, offer limit, interview clashes, notifications</td></tr>
+<tr><td>Data</td><td><code>repository.py</code></td><td>SQL only (every value is a query parameter)</td></tr>
+<tr><td>Cross-cutting</td><td><code>security.py</code>, <code>idempotency.py</code>, <code>uploads.py</code>, <code>observability.py</code></td><td>Passwords and tokens, retry safety, files, request IDs and metrics</td></tr>
 </table>
-<img class="shot" src="file:///C:/Users/ashut/Downloads/New%20folder%20(9)/kriti-projects/campus-recruitment-api/docs/screenshot-swagger.png" alt="Interactive API documentation">
 
 <h2>Data model</h2>
 <div class="mermaid">
 erDiagram
+  STUDENT ||--o| USER : "signs in as"
   STUDENT ||--o{ APPLICATION : submits
-  JOB ||--o{ APPLICATION : receives
   COMPANY ||--o{ JOB : posts
-  APPLICATION ||--o{ APPLICATION_EVENT : "history"
-  STUDENT { int id string email UK string roll_no UK string branch float cgpa string key_hash }
-  JOB { int id float min_cgpa int openings date deadline string status }
-  APPLICATION { int id int student_id int job_id string status }
-  APPLICATION_EVENT { string from_status string to_status string actor string at }
+  JOB ||--o{ APPLICATION : receives
+  APPLICATION ||--o{ APPLICATION_EVENT : "audit trail"
+  APPLICATION ||--o| INTERVIEW : slot
+  STUDENT ||--o{ NOTIFICATION : receives
+  STUDENT { bigint id text email text roll_no text branch float cgpa text resume_path }
+  USER { bigint id text email text password_hash text role }
+  JOB { bigint id float min_cgpa int openings date deadline text status }
+  APPLICATION { bigint id text status }
+  INTERVIEW { timestamptz starts_at timestamptz ends_at text panel }
 </div>
-<p>One application per student per job is a database <code>UNIQUE</code> constraint, so it holds even when two requests
-arrive together; a Python check alone could be raced.</p>
+<ul>
+<li><code>students.cgpa</code> is <code>NULL</code> until the placement office enters it; nothing is open to a student before that.</li>
+<li><code>UNIQUE (student_id, job_id)</code> on applications: one application per job, enforced by the database even under parallel requests.</li>
+<li>Schema changes are Alembic migrations (<code>backend/migrations</code>), applied on start under a Postgres advisory lock so two instances never migrate at once.</li>
+</ul>
 
-<h2>Rules the API enforces</h2>
+<h2>Rules the system enforces</h2>
 <table>
-<tr><th>Rule</th><th>Response when broken</th></tr>
-<tr><td>Valid input (email, CGPA 0–10, known branch, openings &gt; 0, deadline not in the past)</td><td>422</td></tr>
-<tr><td>Unique email, roll number, company name; one application per student per job</td><td>409</td></tr>
-<tr><td>Branch eligible and CGPA at least the job's minimum</td><td>403</td></tr>
-<tr><td>Students only see and change their own records (not their CGPA)</td><td>403</td></tr>
-<tr><td>Status moves only along the workflow below</td><td>409</td></tr>
-<tr><td>No more offers than openings; the job closes itself when full</td><td>409</td></tr>
+<tr><th>Rule</th><th>When broken</th></tr>
+<tr><td>Valid input: college email for sign-up, CGPA 0–10, known branch, openings &gt; 0, future deadline, interview times with a time zone</td><td>422</td></tr>
+<tr><td>Unique email, roll number, company; one application per student per job</td><td>409</td></tr>
+<tr><td>Branch eligible; CGPA verified and at least the minimum</td><td>403</td></tr>
+<tr><td>Students only see and change their own records; cannot set CGPA; can only withdraw</td><td>403</td></tr>
+<tr><td>Status moves only along the workflow; no more offers than openings (job closes itself when full)</td><td>409</td></tr>
+<tr><td>No overlapping interviews for one student or one panel</td><td>409</td></tr>
+<tr><td>Resume is really a PDF (first bytes) and at most 2 MB</td><td>415 / 413</td></tr>
+<tr><td>Five wrong passwords for one email in 15 minutes</td><td>429</td></tr>
 </table>
 <div class="mermaid">
 stateDiagram-v2
@@ -71,11 +98,12 @@ stateDiagram-v2
 </div>
 
 <h2>Walkthrough: real requests</h2>
-<p>Output of <code>scripts/walkthrough.py</code> against a fresh local server (a job with <b>one</b> opening, minimum CGPA 7.5, CSE/IT only):</p>
-<pre><code>POST /jobs  openings=1, min CGPA 7.5, CSE/IT
-  -> 201  {"id": 1, "title": "SWE Intern", "openings": 1, "status": "open"}
-POST /students x4  -> 201, each returns its own API key once (only a SHA-256 hash is stored)
-Asha (student) applies, Idempotency-Key: a1
+<p>Output of <code>scripts/walkthrough.py</code> against a fresh local server (one job with <b>one</b> opening, minimum CGPA 7.5, CSE/IT only):</p>
+<pre><code>Sign-up with a non-college email
+  -> 422  {"detail": "use your college email address (@geu.ac.in)"}
+Asha applies before her CGPA is verified
+  -> 403  {"detail": "your CGPA has not been verified by the placement office yet"}
+Asha applies, Idempotency-Key: a1
   -> 201  {"id": 1, "status": "applied"}
 same request retried after a timeout (key a1)
   -> 201  Idempotent-Replayed: true  {"id": 1, "status": "applied"}
@@ -85,71 +113,114 @@ Kabir (CGPA 6.9) applies
   -> 403  {"detail": "CGPA 6.9 is below the minimum 7.5"}
 Ravi tries to apply as Asha
   -> 403  {"detail": "students can only access their own records"}
-Officer: applied -> offered (skips interview)
+Ravi tries to set his own CGPA
+  -> 403  {"detail": "CGPA is updated by the placement office from official results"}
+Officer: applied -> offered (skips the interview)
   -> 409  {"detail": "cannot move an application from 'applied' to 'offered'"}
+Interview for Ravi, same panel, 15 min after Asha's
+  -> 409  {"detail": "panel 'Panel A' is already interviewing from 27 Oct 2026, 10:30 AM IST to 11:00 AM"}
 Two reviewers offer the last opening at the same moment
   -> [200, 409]  (exactly one 200, the other 409)
-GET /jobs/1/stats
-  -> 200  {"openings": 1, "total_applications": 2, "by_status": {"interview": 1, "offered": 1}, "offers_left": 0}
-GET /jobs/1
-  -> 200  {"status": "closed"}</code></pre>
+GET /jobs/1  -> {"status": "closed"}</code></pre>
 
-<h2>Reliability</h2>
-<h3>Retries: idempotency keys</h3>
-<p>A client that times out cannot know whether its request worked. With an <code>Idempotency-Key</code>, the first response is
-stored and a retry gets the same response back (<code>Idempotent-Replayed: true</code>) instead of acting twice. Reusing a key
-with a different body is rejected (422); failed requests are not stored, so a corrected retry still works. Payment APIs
-require the same pattern.</p>
-<h3>Races: the last opening</h3>
-<p><code>change_status</code> reads the application, checks "offers left?" and writes inside one <code>BEGIN IMMEDIATE</code> transaction,
-which takes SQLite's write lock before reading. The second reviewer therefore sees the first offer and gets 409. The update is
-also compare-and-set (<code>WHERE status = &lt;status we read&gt;</code>). <code>tests/test_concurrency.py</code> fires 8 parallel offers
-at a job with one opening and checks that exactly one wins.</p>
-<div class="note">Writing that test found a real bug: the database connection was opened on one worker thread and used on
-another, which SQLite refuses by default. The fix and the reasoning are in <code>app/db.py</code>.</div>
+<h2>Concurrency and retries</h2>
+<h3>The last opening</h3>
+<p><code>change_status</code> locks the job row with <code>SELECT ... FOR UPDATE</code> before reading anything, then locks the
+application. A second reviewer's transaction waits on the job lock, then sees the first offer and gets 409. The update is
+also compare-and-set (<code>WHERE status = &lt;status we read&gt;</code>). Locks are always taken job first, then
+application, so two transactions can never wait on each other in a circle (no deadlock). Applying takes a
+<code>FOR SHARE</code> lock, so many students can apply at once but a job cannot be closed in the middle of an application.</p>
+<h3>Idempotency keys</h3>
+<p>The first version (SQLite) stored the key <i>after</i> the action, so two simultaneous first attempts with the same key
+could both run. Now the key is <b>reserved first, in the same transaction</b>:</p>
+<div class="mermaid">
+sequenceDiagram
+  participant A as Request 1 (key k)
+  participant B as Request 2 (key k)
+  participant D as PostgreSQL
+  A->>D: INSERT key k (reserved, not committed)
+  B->>D: INSERT key k
+  Note over B,D: waits on request 1's row
+  A->>D: apply, store response, COMMIT
+  D-->>B: conflict: key exists
+  B->>D: SELECT stored response
+  B-->>B: replay it (Idempotent-Replayed: true)
+</div>
+<p>If request 1 fails, its reservation rolls back with it and request 2 runs normally, so a corrected retry works.
+A test sends 8 simultaneous first attempts with one key: one application is created and 7 responses are replays.</p>
+<h3>Interview clashes</h3>
+<p>"Check for an overlap, then insert" is a race. <code>schedule_interview</code> locks the student's row and takes a
+per-panel advisory lock (<code>pg_advisory_xact_lock(hashtext(lower(panel)))</code>), in that order, before checking and
+writing. A test books one panel for six students in parallel: exactly one succeeds. (A Postgres exclusion constraint on
+time ranges would be the database-level alternative; it needs the <code>btree_gist</code> extension.)</p>
 
-<h2>Security and observability</h2>
+<h2>Security</h2>
 <table>
 <tr><th>Concern</th><th>How</th></tr>
-<tr><td>Authentication</td><td><code>X-API-Key</code> on every request. Student keys are random, shown once, stored as SHA-256 hashes; the officer key is compared in constant time.</td></tr>
-<tr><td>Authorisation</td><td>Officer: everything. Student: own profile (not CGPA), own applications, job listings. Checked in routes and again in services.</td></tr>
-<tr><td>Audit</td><td>Every status change records from, to, actor (<code>officer</code> / <code>student:&lt;id&gt;</code>) and time.</td></tr>
-<tr><td>Tracing</td><td><code>X-Request-ID</code> on every response (echoed if sent), one JSON log line per request.</td></tr>
-<tr><td>Metrics</td><td><code>/metrics</code>: requests, status codes and p50/p95 latency per route template (officer only).</td></tr>
-<tr><td>Delivery</td><td>Dockerfile (non-root user, database in a volume), GitHub Actions CI, one-click Render blueprint.</td></tr>
+<tr><td>Passwords</td><td>bcrypt (cost 12). An unknown email is checked against a dummy hash, so response times do not reveal which emails have accounts; the error message is the same.</td></tr>
+<tr><td>Sessions</td><td>HS256 JWT, 8-hour expiry, algorithm list fixed on decode; startup warns if <code>JWT_SECRET</code> is missing or shorter than 32 bytes.</td></tr>
+<tr><td>Brute force</td><td>5 wrong passwords for one email in 15 minutes → 429.</td></tr>
+<tr><td>Authorisation</td><td>Checked on every route and again in services; students only reach their own records.</td></tr>
+<tr><td>API keys</td><td>For scripts: stored as SHA-256, shown once; the officer key is compared in constant time.</td></tr>
+<tr><td>SQL injection</td><td>Every value is a query parameter; column names for updates come from a fixed allow-list.</td></tr>
+<tr><td>Uploads</td><td>Type from the file's bytes, size limit while reading, random stored names (no path traversal).</td></tr>
+<tr><td>CSV injection</td><td>Cells starting with <code>= + - @</code> are prefixed with <code>'</code>.</td></tr>
+<tr><td>Headers</td><td><code>X-Content-Type-Options: nosniff</code>, <code>Referrer-Policy: no-referrer</code>; nginx adds <code>X-Frame-Options: DENY</code>.</td></tr>
 </table>
 
-<h2>Testing</h2>
+<h2>Web app</h2>
+<img class="shot" src="file:///C:/Users/ashut/Downloads/New%20folder%20(9)/kriti-projects/campus-recruitment-api/docs/screenshot-student-jobs.png" alt="Student job list">
+<ul>
+<li>One API client (<code>api.ts</code>) adds the token, turns error responses into readable messages and signs the user out when a session expires.</li>
+<li>Each "Apply" or status change gets an Idempotency-Key; retrying the same action reuses it.</li>
+<li>The kanban asks the API which moves are allowed (<code>/meta/workflow</code>) and shows only those; the API still checks every move.</li>
+<li>Accessibility: labelled fields, focus moved to the page heading after navigation, a skip link, live-region announcements on the board, keyboard-usable buttons for every drag-and-drop action, AA-contrast status colours; axe-core runs in the tests.</li>
+<li>Responsive down to 375 px: the kanban columns stack and wide tables scroll inside their card, so the page never scrolls sideways.</li>
+</ul>
+<img class="shot" src="file:///C:/Users/ashut/Downloads/New%20folder%20(9)/kriti-projects/campus-recruitment-api/docs/screenshot-applications.png" alt="Application timeline">
+
+<h2>Testing and delivery</h2>
 <table>
 <tr><th>Suite</th><th>Covers</th></tr>
-<tr><td><code>test_students.py</code></td><td>Validation, uniqueness, filters, pagination, partial updates, delete cascade</td></tr>
-<tr><td><code>test_jobs_and_applications.py</code></td><td>Eligibility, deadlines, workflow transitions, offer limit, auto-close, stats</td></tr>
-<tr><td><code>test_security_reliability.py</code></td><td>Keys, roles, ownership, idempotent replay and conflicts, request IDs, metrics</td></tr>
-<tr><td><code>test_concurrency.py</code></td><td>8 parallel offers for 1 opening: exactly one succeeds</td></tr>
+<tr><td><code>test_students.py</code>, <code>test_jobs_and_applications.py</code></td><td>Validation, uniqueness, filters, eligibility, workflow, offer limit, auto-close, stats</td></tr>
+<tr><td><code>test_security_reliability.py</code></td><td>API keys, roles, idempotent replay and conflicts, audit trail, request IDs, metrics</td></tr>
+<tr><td><code>test_auth.py</code></td><td>Sign-up rules, bcrypt storage, login, lockout, expired and forged tokens, CGPA verification, first-officer bootstrap</td></tr>
+<tr><td><code>test_uploads.py</code></td><td>PDF check, size, path traversal, replacement, access control</td></tr>
+<tr><td><code>test_interviews_notifications_export.py</code></td><td>Interview rules and clashes, notifications, CSV export, dashboard numbers</td></tr>
+<tr><td><code>test_concurrency.py</code></td><td>8 parallel offers (1 wins), 8 simultaneous first attempts with one key (1 application), 6 parallel bookings of one panel (1 wins)</td></tr>
+<tr><td><code>frontend/src/test</code></td><td>Sign-in and role routing, expired sessions, eligibility reasons, idempotent apply retry, pipeline moves, axe checks</td></tr>
 </table>
-<pre><code>pip install -r requirements.txt
-$env:RECRUIT_ADMIN_KEY = "&lt;a long random string&gt;"
-uvicorn app.main:app --reload        # http://127.0.0.1:8000/docs
-python -m pytest -q                  # 48 tests</code></pre>
+<p>Backend tests run against a real PostgreSQL: a service container in CI, or a throwaway server started with
+<code>pgserver</code> locally, because the guarantees above are database behaviour a fake would not reproduce. The concurrency
+tests passed 31 runs in a row while this was built. CI also runs the seed script, type-checks and builds the web app, and
+builds both Docker images.</p>
+<pre><code>docker compose up --build            # http://localhost:8080
+docker compose exec backend python seed.py
+cd backend; python -m pytest -q       # 77 tests
+cd frontend; npm test                 # 11 tests</code></pre>
 
 <h2>Limitations and next steps</h2>
 <ul>
-<li>Idempotency is checked before and stored after the action, outside one transaction: two <i>simultaneous</i> first attempts with the same key could both run (the <code>UNIQUE</code> rule still blocks a duplicate application). Fix: reserve the key in the same transaction.</li>
-<li>Key rotation and expiry; per-key rate limiting.</li>
-<li>Migrations (Alembic) and PostgreSQL for several instances, with row locks (<code>SELECT … FOR UPDATE</code>) instead of SQLite's single write lock.</li>
-<li>Export metrics to Prometheus instead of in-process counters.</li>
+<li>The token lives in <code>sessionStorage</code>: simple, but readable by any XSS. An HttpOnly cookie with CSRF protection is stronger.</li>
+<li>Login lockout and metrics are in memory (per instance); several instances would use Redis or the database, and Prometheus.</li>
+<li>No email verification, password reset or refresh tokens yet.</li>
+<li>Resumes are on a local volume; Render's free tier has no persistent disk, so object storage is the real fix.</li>
+<li>Notifications are in-app only.</li>
+<li>Demo data is generated and fictional; there are no real usage figures.</li>
 </ul>
 
 <h2>Interview questions</h2>
 <dl class="qa">
-<dt>Why a database constraint and not only a Python check for duplicates?</dt>
-<dd>Two requests can both pass the Python check before either inserts. The constraint is enforced by the database at write time.</dd>
-<dt>Why <code>BEGIN IMMEDIATE</code> instead of <code>BEGIN</code>?</dt>
-<dd>A plain <code>BEGIN</code> takes the write lock only at the first write, so two transactions could both read "1 offer left". <code>IMMEDIATE</code> locks before the read.</dd>
-<dt>422 vs 403 vs 404 vs 409?</dt>
-<dd>Malformed input; allowed input but a rule forbids it; record missing; request conflicts with the current state.</dd>
-<dt>Why store API keys hashed and compare in constant time?</dt>
-<dd>A leaked database does not leak usable keys; constant-time comparison stops timing attacks from guessing a key byte by byte.</dd>
-<dt>What does an idempotency key protect against?</dt>
-<dd>A client retrying after a timeout and causing the action twice: a second application, a second status change, or in payments a second charge.</dd>
+<dt>Why lock the job row and not just check the offer count?</dt>
+<dd>Two transactions can both read "1 opening left" before either writes. <code>FOR UPDATE</code> makes the second wait until the first commits, so it reads the new count.</dd>
+<dt>Why reserve the idempotency key before doing the work?</dt>
+<dd>Inserting the key first makes Postgres serialise requests with the same key: the second waits on the first's uncommitted row, then replays its response. Storing it afterwards leaves a window where both run.</dd>
+<dt>Why is a UNIQUE constraint still needed?</dt>
+<dd>Application code checks can be raced; the database enforces the rule at write time no matter how requests interleave.</dd>
+<dt>Why bcrypt for passwords but SHA-256 for API keys?</dt>
+<dd>Passwords are short and guessable, so hashing must be slow. API keys are long random strings, so a fast hash is enough.</dd>
+<dt>What stops a forged token?</dt>
+<dd>The signature is checked with the server's secret and only HS256 is accepted, so a token signed with another key (or with "none") is rejected.</dd>
+<dt>401 vs 403 vs 409 vs 422?</dt>
+<dd>Not signed in; signed in but not allowed; conflicts with the current state; the request itself is invalid.</dd>
 </dl>

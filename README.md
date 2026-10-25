@@ -1,81 +1,136 @@
-# Campus Recruitment Management API
+# PlaceRight: Campus Recruitment Portal
 
-REST API for a college placement cell: student profiles, companies, job postings and applications, with eligibility
-rules, an application status workflow and automated tests.
+A full-stack placement portal for a college placement cell. Students sign up with their college email, see only
+the jobs they are eligible for, apply in one click and follow every step of their application. The placement
+office verifies CGPAs, posts jobs, moves applicants through a kanban pipeline, books interview slots without
+clashes and exports applicant lists.
 
-Python · FastAPI · SQLite (plain SQL, no ORM) · Pydantic · pytest
+React + TypeScript · FastAPI · PostgreSQL (plain SQL, Alembic migrations) · JWT + bcrypt · Docker · GitHub Actions
 
-**[Full documentation (PDF)](docs/Campus_Recruitment_API_Documentation.pdf)** · see it work end to end: `python scripts/walkthrough.py` against a fresh server (retries, eligibility, ownership, workflow and the race for the last opening)
+**[Full documentation (PDF)](docs/Campus_Recruitment_API_Documentation.pdf)**
 
-![Interactive API docs](docs/screenshot-swagger.png)
+| Officer dashboard | Applicant pipeline |
+|---|---|
+| ![Officer dashboard with KPIs and charts](docs/screenshot-dashboard.png) | ![Kanban pipeline for one job](docs/screenshot-pipeline.png) |
+| **Student: eligible jobs** | **Student: application timeline** |
+| ![Jobs the student is eligible for](docs/screenshot-student-jobs.png) | ![Applications with progress and history](docs/screenshot-applications.png) |
+
+<img src="docs/screenshot-mobile.png" alt="Pipeline on a 375px phone screen" width="220" align="right">
+
+## What it does
+
+**Students**
+- sign up with a `@geu.ac.in` email (password stored as a bcrypt hash); CGPA is entered by the placement office,
+  never by the student
+- see the jobs that match their branch and verified CGPA, with the reason when a job is not open to them
+- apply once (retries are safe), track each application on a progress bar and a timeline of who changed what and when
+- upload a resume (PDF, max 2 MB), get notifications when an application moves or an interview is booked
+
+**Placement office**
+- dashboard: students, open jobs, applications, offers, placement rate, upcoming interviews; applications per job,
+  where applications are, placements by branch
+- per-job kanban: only valid moves are offered (buttons or drag and drop), and the API enforces them again
+- interview scheduling: a student cannot be in two interviews at once and a panel cannot interview two people at once
+- CGPA verification, company and job management, CSV export of applicants
+
+## Architecture
 
 ```mermaid
 flowchart LR
-  C[Client] -->|X-API-Key, Idempotency-Key| M[Middleware<br/>request ID, JSON log, metrics]
-  M --> A{Auth<br/>hashed API key -> role}
-  A -->|officer / student| R[Routes<br/>validation 422]
-  R --> I[Idempotency<br/>replay stored response]
-  I --> S[Services<br/>eligibility, workflow,<br/>offer limit, audit]
-  S -->|BEGIN IMMEDIATE<br/>compare-and-set| D[(SQLite)]
+  B[Browser<br/>React + TypeScript] -->|/api/*| N[nginx<br/>static files + proxy]
+  N --> M[FastAPI middleware<br/>request ID, JSON log, metrics]
+  M --> A{Auth<br/>JWT or API key -> role}
+  A --> R[Routes<br/>validation 422]
+  R --> I[Idempotency<br/>key reserved in the<br/>same transaction]
+  I --> S[Services<br/>eligibility, workflow,<br/>offer limit, interviews,<br/>notifications]
+  S -->|row locks,<br/>compare-and-set| D[(PostgreSQL)]
+  R --> U[(Resume files<br/>volume)]
 ```
 
-**Deploy a live demo:** on [Render](https://render.com) choose *New + → Blueprint* and pick this repo; `render.yaml` does
-the rest (it also generates the officer key). Then open `https://<your-service>.onrender.com/docs`.
+| Layer | Where | Knows about |
+|---|---|---|
+| Web app | `frontend/src` | pages, forms, API client (`api.ts`), auth state (`auth.tsx`) |
+| HTTP | `backend/app/main.py` | routes, status codes, who may call what |
+| Validation | `backend/app/schemas.py` | email, CGPA 0–10, branches, time zones, sizes |
+| Business rules | `backend/app/services.py` | eligibility, workflow, offer limit, interview clashes, notifications |
+| Data | `backend/app/repository.py` | SQL only |
+| Cross-cutting | `security.py`, `idempotency.py`, `uploads.py`, `observability.py` | auth, retry safety, files, metrics |
 
-## Run
+```mermaid
+erDiagram
+  STUDENT ||--o| USER : "signs in as"
+  STUDENT ||--o{ APPLICATION : submits
+  COMPANY ||--o{ JOB : posts
+  JOB ||--o{ APPLICATION : receives
+  APPLICATION ||--o{ APPLICATION_EVENT : "audit trail"
+  APPLICATION ||--o| INTERVIEW : "slot"
+  STUDENT ||--o{ NOTIFICATION : receives
+  STUDENT { bigint id text email UK text roll_no UK text branch float cgpa "NULL until verified" text resume_path }
+  USER { bigint id text email UK text password_hash text role }
+  JOB { bigint id float min_cgpa text_array eligible_branches int openings date deadline text status }
+  APPLICATION { bigint id text status "UNIQUE(student_id, job_id)" }
+  INTERVIEW { timestamptz starts_at timestamptz ends_at text panel text mode }
+```
+
+## Run it
+
+**Docker (everything):**
+
+```bash
+cp .env.example .env               # then change every value
+docker compose up --build          # http://localhost:8080   (API docs: http://localhost:8080/api/docs)
+docker compose exec backend python seed.py     # optional fictional demo data
+```
+
+**Without Docker (Windows friendly):**
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-$env:RECRUIT_ADMIN_KEY = "<a long random string>"   # the placement officer's API key (never commit it)
-uvicorn app.main:app --reload          # interactive docs: http://127.0.0.1:8000/docs
-python -m pytest -q                    # 48 tests
-docker build -t recruitment-api . ; docker run -e RECRUIT_ADMIN_KEY=... -p 8000:8000 recruitment-api
+cd backend
+python -m venv .venv; .venv\Scripts\activate
+pip install -r requirements-dev.txt
+python dev_db.py                   # starts a local Postgres (pgserver) and prints DATABASE_URL=...
+$env:DATABASE_URL = "<printed url>"; $env:JWT_SECRET = "<32+ random characters>"
+python seed.py                     # fictional demo data (logins below)
+uvicorn app.main:app --port 8102   # API, docs at http://127.0.0.1:8102/docs
+
+cd ../frontend
+npm install
+$env:VITE_DEMO = "1"; npm run dev  # http://localhost:5182 (forwards /api to :8102)
 ```
 
-Every request sends `X-API-Key`. The officer's key comes from `RECRUIT_ADMIN_KEY`; creating a student returns that
-student's own key once. The database is a file (`recruitment.db`, or the path in `RECRUIT_DB`), created on first start.
-CI (`.github/workflows/ci.yml`) runs the tests and builds the Docker image on every push and pull request.
+Demo logins (seeded, fictional): `officer@geu.ac.in` and e.g. `aarav.sharma@geu.ac.in`, password `placeright-demo`
+(set `SEED_PASSWORD` before seeding anything public).
 
-## Endpoints
+**Tests**
 
-| Method | Path | What |
-|---|---|---|
-| POST / GET | `/students`, `/students/{id}` | Create, list (filter by branch, min CGPA, skill; paginated), get |
-| PATCH / DELETE | `/students/{id}` | Partial update, delete (also deletes their applications) |
-| GET | `/students/{id}/eligible-jobs` | Open jobs this student can apply to (branch, CGPA, deadline) |
-| POST / GET | `/companies` | Create, list |
-| POST / GET | `/jobs`, `/jobs/{id}` | Create, list (filter by status, company, branch; paginated), get |
-| POST | `/jobs/{id}/close` | Stop accepting applications |
-| GET | `/jobs/{id}/stats` | Applications by status, offers left |
-| POST / GET | `/applications` | Apply, list (filter by job, student, status) |
-| PATCH | `/applications/{id}/status` | Move through the workflow |
-| GET | `/applications/{id}/history` | Audit trail: every status change, who made it, when |
-| GET | `/metrics` | Requests, status codes and p50/p95 latency per route (officer only) |
+```bash
+cd backend && python -m pytest -q      # 77 tests against a real Postgres (DATABASE_URL, or pgserver locally)
+cd frontend && npm test                # 11 tests: flows, retries, workflow rules, axe accessibility checks
+python scripts/walkthrough.py          # end-to-end story against a running API with an empty database
+```
 
-## Security and reliability
+CI (`.github/workflows/ci.yml`) runs the backend tests against a Postgres service container, runs the seed script,
+type-checks, tests and builds the web app, and builds both Docker images.
 
-| Concern | How it is handled |
+**Deploy:** `render.yaml` creates a Postgres database, the API and the static web app on Render (see the comments in
+that file for free-tier limits).
+
+## Rules the system enforces
+
+| Rule | Response when broken |
 |---|---|
-| Authentication | `X-API-Key` on every request. Student keys are random, shown once, stored as SHA-256 hashes; the officer key is compared in constant time |
-| Authorisation | Officer: everything. Student: own profile (not CGPA), own applications (apply, withdraw), job listings. Checked on every route and again in the service layer |
-| Retries | `Idempotency-Key` on `POST /applications` and `PATCH .../status`: a retry returns the stored first response (`Idempotent-Replayed: true`) instead of acting twice; the same key with a different body is 422; failed requests are not stored, so a fixed retry works |
-| Audit | `application_events` records from-status, to-status, actor (`officer` / `student:<id>`) and time for every change |
-| Observability | `X-Request-ID` on every response (echoed if the client sent one), one JSON log line per request, `/metrics` grouped by route template |
-| Delivery | Dockerfile (non-root user, database in a volume), GitHub Actions CI |
-
-## Rules the API enforces
-
-- **Validation (422):** email format, CGPA 0-10, known branch codes, roll number format, openings > 0, deadline not
-  in the past, at least one eligible branch.
-- **Uniqueness (409):** one student per email and per roll number, one company per name, one application per student
-  per job (a database `UNIQUE` constraint, so it holds even under parallel requests).
-- **Eligibility (403):** a student can apply only if their branch is eligible and their CGPA meets the minimum.
-- **Workflow (409 on anything else):**
+| Valid input (college email for sign-up, CGPA 0–10, known branch, openings > 0, future deadline, time zone on interview times) | 422 |
+| Unique email, roll number, company name; one application per student per job (database constraint) | 409 |
+| Branch eligible, CGPA verified and at least the job's minimum | 403 |
+| Students only see and change their own records, cannot set their CGPA, can only withdraw | 403 |
+| Status moves only along the workflow below; no more offers than openings (the job closes itself when full) | 409 |
+| No overlapping interviews for a student or for a panel | 409 |
+| Resume: PDF bytes (not just the name), at most 2 MB | 415 / 413 |
+| Five wrong passwords for one email within 15 minutes | 429 |
 
 ```mermaid
 stateDiagram-v2
+  direction LR
   [*] --> applied
   applied --> shortlisted
   applied --> rejected
@@ -85,48 +140,57 @@ stateDiagram-v2
   shortlisted --> withdrawn
   interview --> offered
   interview --> rejected
-  offered --> [*]
-  rejected --> [*]
-  withdrawn --> [*]
 ```
 
-- **Offer limit:** a job never gets more offers than openings. When the last opening is filled the job closes itself.
+## How the tricky parts work
 
-## How it works
+**The last opening.** Two reviewers click "Make offer" for the last opening at the same moment. `change_status`
+locks the job row (`SELECT ... FOR UPDATE`) before reading anything, so the second request waits, then sees the first
+offer and gets 409. The status update is also compare-and-set (`WHERE status = <what we read>`).
+`test_concurrency.py` fires 8 parallel offers at a job with one opening and checks that exactly one wins.
 
-Three layers, each with one job:
+**Retries.** `POST /applications` and `PATCH .../status` accept an `Idempotency-Key`. The key is *reserved* in the
+same transaction as the action: if two first attempts with the same key arrive together, Postgres makes the second
+one wait on the first one's uncommitted row, then it replays the stored response. If the first attempt fails, the
+reservation rolls back with it, so a corrected retry works. The web app sends one key per click and reuses it if the
+student retries after a network error. (The earlier SQLite version stored the key after the action and documented
+that two simultaneous first attempts could both run; this closes that gap, and a test covers it.)
 
-| Layer | File | Knows about |
-|---|---|---|
-| HTTP | `app/main.py` | routes, status codes, request/response models |
-| Business rules | `app/services.py` | eligibility, deadlines, workflow, offer limit |
-| Data | `app/repository.py` | SQL only |
+**Interview clashes.** Checking for an overlap and then inserting is a race: two officers could both see "free".
+`schedule_interview` locks the student's row and takes a per-panel advisory lock (always in that order, so no
+deadlocks) before checking and writing. A test books one panel for six students in parallel; exactly one succeeds.
 
-Validation lives in `app/schemas.py` (Pydantic), so bad input is rejected before any SQL runs.
+**Accounts.** Sign-up creates the student and the login in one transaction. Passwords are bcrypt-hashed; an unknown
+email is checked against a dummy hash so response times do not reveal which emails have accounts. Tokens are HS256
+JWTs with a fixed algorithm list and an 8-hour expiry. API keys (for scripts) are stored as SHA-256 hashes and the
+officer key is compared in constant time.
 
-**Race safety.** Two reviewers might click "offer" for the last opening at the same moment. `change_status` runs the
-read, the "offers left?" check and the write inside one `BEGIN IMMEDIATE` transaction, which takes SQLite's write lock
-first, so the second request sees the first one's offer and gets 409. The status update is also compare-and-set
-(`WHERE status = <the status we read>`). `tests/test_concurrency.py` fires 8 parallel offers at a job with 1 opening and
-checks that exactly one wins.
+**Uploads.** The file type is checked from the first bytes (`%PDF-`), the size while reading, and the stored file
+gets a random name, so `../../etc/passwd.pdf` cannot write outside the uploads folder.
 
-Writing that test found a real bug: FastAPI opened the database connection on one worker thread and ran the endpoint
-on another, which SQLite refuses by default. The fix and the reason are in `app/db.py`.
+**CSV export.** Cells starting with `=`, `+`, `-` or `@` are prefixed with `'` so a spreadsheet shows them as text
+instead of running them as formulas ("CSV injection").
+
+## Limitations and next steps
+
+- The login token is kept in `sessionStorage`. That is simple, and it means any XSS on the page could read it.
+  An HttpOnly cookie plus CSRF protection would be stronger.
+- Login lockout and metrics are in memory, so they are per instance. With several instances they would move to Redis
+  or the database, and metrics to Prometheus.
+- No email verification or password reset yet, and no refresh tokens (users sign in again after 8 hours).
+- Resumes are stored on a local volume. On Render's free tier they are lost on restart; object storage (S3) is the
+  real fix.
+- Notifications are in-app only (no email or push).
+- The demo data is generated (`seed.py`) and fictional. There are no real usage numbers; the dashboard shows
+  whatever is in the database.
 
 ## Things to be ready to explain
 
-- Why a database constraint, not only a Python check, prevents duplicate applications.
-- What `BEGIN IMMEDIATE` does and why a plain `BEGIN` would not be enough here.
-- Why validation returns 422, a missing record 404, a broken rule 403 and a conflict 409.
-- What changes for PostgreSQL: row locks (`SELECT ... FOR UPDATE`) instead of SQLite's single write lock.
-- What an idempotency key protects against (a client retrying after a timeout) and why payment APIs require them.
-- Why API keys are stored hashed, and why the comparison is constant-time.
-
-## Not done yet (good next steps)
-
-- Idempotency is checked before and stored after the action, outside one transaction: two *simultaneous* first
-  attempts with the same key could both run (the database `UNIQUE` rule still stops a duplicate application).
-  Fix: reserve the key in the same transaction as the action.
-- Key rotation and expiry; per-key rate limiting.
-- Database migrations (Alembic) instead of `CREATE TABLE IF NOT EXISTS`; PostgreSQL for several instances.
-- Metrics to Prometheus instead of in-process counters.
+- Why `SELECT ... FOR UPDATE` on the job row, and why the job is locked before the application (lock order).
+- Why the idempotency key is inserted *before* the action in the same transaction, and what Postgres does when two
+  transactions insert the same primary key.
+- Why a database `UNIQUE` constraint is still needed when the code checks for duplicates.
+- 401 vs 403 vs 404 vs 409 vs 422, and when 413, 415 and 429 are used.
+- What a JWT contains, why `algorithms=["HS256"]` is fixed, and why tokens expire.
+- Why bcrypt and not SHA-256 for passwords, and why API keys can use SHA-256.
+- How the web app knows which buttons to show (`/meta/workflow`), and why the API checks again anyway.

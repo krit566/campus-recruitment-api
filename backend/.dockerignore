@@ -1,6 +1,9 @@
 .venv/
 __pycache__/
 .pytest_cache/
+.pgdata/
+uploads/
 tests/
+dev_db.py
 *.db
 .git/

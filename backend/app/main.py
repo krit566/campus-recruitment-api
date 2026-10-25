@@ -54,6 +54,7 @@ from .security import (
     Principal,
     authenticate,
     bootstrap_officer,
+    check_secret,
     current_principal,
     hash_password,
     issue_token,
@@ -66,6 +67,7 @@ from .security import (
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    check_secret()
     if os.environ.get("RUN_MIGRATIONS", "1") == "1":
         db.migrate()
     db.open_pool()

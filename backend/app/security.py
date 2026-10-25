@@ -114,6 +114,15 @@ def _secret() -> str:
     return s
 
 
+def check_secret() -> None:
+    """Called at startup: warns about a missing or short JWT_SECRET (HS256 needs at least 32 bytes of key)."""
+    s = os.environ.get("JWT_SECRET", "")
+    if not s:
+        log.warning("JWT_SECRET is not set: using a random secret, so everyone is signed out on every restart")
+    elif len(s.encode()) < 32:
+        log.warning("JWT_SECRET is shorter than 32 bytes; use a long random value in production")
+
+
 def _hours() -> int:
     return int(os.environ.get("JWT_HOURS", "8"))
 

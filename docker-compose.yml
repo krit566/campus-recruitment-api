@@ -1,0 +1,45 @@
+# Everything on one machine:  cp .env.example .env  (then edit it)  ->  docker compose up --build
+# Web app: http://localhost:8080      API docs: http://localhost:8080/api/docs
+# Demo data (fictional):  docker compose exec backend python seed.py
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: placeright
+      POSTGRES_USER: placeright
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U placeright -d placeright"]
+      interval: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://placeright:${POSTGRES_PASSWORD}@db:5432/placeright
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env}
+      RECRUIT_ADMIN_KEY: ${RECRUIT_ADMIN_KEY:-}
+      RECRUIT_OFFICER_EMAIL: ${RECRUIT_OFFICER_EMAIL:-}
+      RECRUIT_OFFICER_PASSWORD: ${RECRUIT_OFFICER_PASSWORD:-}
+      COLLEGE_EMAIL_DOMAIN: ${COLLEGE_EMAIL_DOMAIN:-geu.ac.in}
+    volumes:
+      - uploads:/data/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_DEMO: ${VITE_DEMO:-0}
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:
+  uploads:

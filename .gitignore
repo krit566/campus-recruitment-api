@@ -4,3 +4,11 @@ __pycache__/
 .pytest_cache/
 *.db
 .env
+
+# local data
+.pgdata/
+uploads/
+node_modules/
+dist/
+*.tsbuildinfo
+frontend/public/__*.html
